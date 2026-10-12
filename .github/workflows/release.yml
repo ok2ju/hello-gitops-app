@@ -1,0 +1,73 @@
+name: release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE: ghcr.io/ok2ju/hello-gitops-app
+  GITOPS_REPO: ok2ju/hello-gitops-infra
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        run: echo "tag=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v6
+        with:
+          push: true
+          build-args: VERSION=${{ steps.tag.outputs.tag }}
+          tags: ${{ env.IMAGE }}:${{ steps.tag.outputs.tag }}
+
+  # Same image, new tag written into the gitops repo. ArgoCD does the rest.
+  deploy-dev:
+    needs: build
+    runs-on: ubuntu-latest
+    environment: dev
+    concurrency: gitops-dev
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+      - env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          yq -i '.image.tag = strenv(TAG)' helm/hello/values-dev.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "dev: hello ${TAG}" || echo "tag already deployed"
+          git push
+
+  # Pauses until a required reviewer approves (Settings > Environments > prod).
+  deploy-prod:
+    needs: [build, deploy-dev]
+    runs-on: ubuntu-latest
+    environment: prod
+    concurrency: gitops-prod
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ env.GITOPS_REPO }}
+          token: ${{ secrets.GITOPS_TOKEN }}
+      - env:
+          TAG: ${{ needs.build.outputs.tag }}
+        run: |
+          yq -i '.image.tag = strenv(TAG)' helm/hello/values-prod.yaml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -am "prod: hello ${TAG}" || echo "tag already deployed"
+          git push
